@@ -73,7 +73,8 @@ defmodule Jido.Chat.WhatsApp.MessageTest do
              })
 
     assert attrs.external_room_id == "120363@g.us"
-    assert attrs.external_reply_to_id == "quoted-1"
+    assert attrs.external_thread_id == "quoted-1"
+    assert attrs.channel_meta.external_thread_id == "quoted-1"
     assert attrs.timestamp == 1_706_745_600
     assert attrs.chat_type == :group
     assert attrs.metadata.from_me == true
@@ -172,16 +173,13 @@ defmodule Jido.Chat.WhatsApp.MessageTest do
 
     assert string_key.message_id == "target-3"
 
-    assert {:ok, %ReactionEvent{} = fallback} =
+    assert {:error, :missing_reaction_target} =
              Message.reaction_event(%{
                id: "target-4",
                channel_jid: "15551234567@s.whatsapp.net",
                type: :reaction,
                content: %{emoji: "ok"}
              })
-
-    assert fallback.user.user_id == "unknown"
-    assert fallback.message_id == "target-4"
   end
 
   test "reaction_event/1 rejects missing reaction targets" do
@@ -191,5 +189,23 @@ defmodule Jido.Chat.WhatsApp.MessageTest do
                type: :reaction,
                content: %{emoji: "ok"}
              })
+  end
+
+  test "reaction_event/1 accepts widened Amarula references without using the reaction ID" do
+    for key <- [
+          {"123@lid", "answer-direct", true},
+          {"120363@g.us", "answer-group", false, "456@lid"}
+        ] do
+      assert {:ok, event} =
+               Message.reaction_event(%{
+                 id: "reaction-wire-id",
+                 channel_jid: "different@lid",
+                 from_jid: "456@lid",
+                 content: %{key: key, emoji: "👍"}
+               })
+
+      assert event.channel_id == elem(key, 0)
+      assert event.message_id == elem(key, 1)
+    end
   end
 end

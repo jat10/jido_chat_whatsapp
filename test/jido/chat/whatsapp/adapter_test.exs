@@ -105,6 +105,44 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
     assert incoming.channel_meta.is_dm == true
   end
 
+  test "transform_incoming/1 normalizes push names without changing the author identity" do
+    payload = %{
+      channel_jid: "120363000000000@g.us",
+      from_jid: "15557654321@s.whatsapp.net",
+      text: "hello"
+    }
+
+    for name <- [nil, "", " ", "~", " ~ "] do
+      assert {:ok, incoming} = Adapter.transform_incoming(Map.put(payload, :pushname, name))
+      assert incoming.external_user_id == payload.from_jid
+      assert incoming.author.user_id == payload.from_jid
+      assert is_nil(incoming.author.full_name)
+      assert is_nil(incoming.display_name)
+    end
+
+    assert {:ok, incoming} =
+             Adapter.transform_incoming(Map.put(payload, :pushname, "  Zoë @ Work  "))
+
+    assert incoming.author.full_name == "Zoë @ Work"
+    assert incoming.display_name == "Zoë @ Work"
+  end
+
+  test "Amarula messages use the same push-name normalization" do
+    message = %Amarula.Msg{
+      channel: Amarula.Address.pn("15551234567"),
+      from: Amarula.Address.pn("15557654321"),
+      pushname: " ~ ",
+      type: :text,
+      content: "hello",
+      raw: %{}
+    }
+
+    assert {:ok, incoming} = Adapter.transform_incoming(message)
+    assert incoming.external_user_id == "15557654321@s.whatsapp.net"
+    assert is_nil(incoming.author.full_name)
+    assert is_nil(incoming.display_name)
+  end
+
   test "transform_incoming/1 normalizes media payloads" do
     media_key = String.duplicate("k", 32)
     encrypted_hash = String.duplicate("h", 32)
@@ -297,6 +335,25 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
     assert envelope.event_type == :message
     assert envelope.thread_id == "whatsapp:15551234567@s.whatsapp.net"
     assert envelope.payload.text == "hello"
+  end
+
+  test "Thread.post keeps delivery in the chat and preserves explicit provider reply options" do
+    thread =
+      Chat.Thread.new(%{
+        id: "whatsapp:group@g.us:root",
+        adapter_name: :whatsapp,
+        adapter: Adapter,
+        external_room_id: "group@g.us",
+        external_thread_id: "root"
+      })
+
+    for quoted <- [nil, {"root", "alice@s.whatsapp.net"}] do
+      opts = [transport: MockTransport, conn: self(), quoted: quoted]
+      assert {:ok, _post} = Chat.Thread.post(thread, "Answer", opts)
+      assert_receive {:send_text, conn, "group@g.us", "Answer", transport_opts}
+      assert conn == self()
+      assert transport_opts[:quoted] == quoted
+    end
   end
 
   test "parse_event/2 wraps reactions in ReactionEvent" do
@@ -524,6 +581,19 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
     assert %{status: 400} = Adapter.format_webhook_response({:error, :bad_payload})
   end
 
+  test "listener preserves custom storage over storage_root" do
+    storage = {MyApp.Storage, tenant: "isolated"}
+
+    assert {:ok, [spec]} =
+             Adapter.listener_child_specs("isolated",
+               sink_mfa: {MyApp.Ingress, :emit, []},
+               ingress: %{mode: :linked_device, profile: "isolated", storage: storage, storage_root: "/unused"}
+             )
+
+    {_, _, [opts]} = spec.start
+    assert opts[:config].storage == storage
+  end
+
   test "listener_child_specs/2 returns linked-device worker spec" do
     assert {:ok, []} = Adapter.listener_child_specs("bridge_whatsapp", ingress: %{mode: "manual"})
 
@@ -555,7 +625,7 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
 
     worker_opts = amarula_spec.start |> elem(2) |> hd()
     assert worker_opts[:config].profile == "settings_profile"
-    assert worker_opts[:config].storage == {Amarula.Storage.File, root: "/tmp/amarula"}
+    assert worker_opts[:config].storage_root == "/tmp/amarula"
     assert worker_opts[:config].max_retries == 0
     assert worker_opts[:config].retry_delay == 1_000
     assert worker_opts[:connect_opts] == [name: :wa_conn]

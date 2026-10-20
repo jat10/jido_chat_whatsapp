@@ -81,6 +81,16 @@ defmodule Jido.Chat.WhatsApp.PreviewIntegrationTest do
   end
 
   defmodule ReplySink do
+    def emit(test_pid, %Jido.Chat.EventEnvelope{} = envelope, _opts) do
+      chat =
+        Jido.Chat.new(adapters: %{whatsapp: Adapter})
+        |> Jido.Chat.on_action("connection_update", fn action ->
+          send(test_pid, {:lifecycle_action, action})
+        end)
+
+      Jido.Chat.route_event(chat, :whatsapp, envelope)
+    end
+
     def emit(test_pid, payload, opts) do
       with {:ok, %Incoming{} = incoming} <- Adapter.transform_incoming(payload),
            {:ok, response} <-
@@ -98,7 +108,7 @@ defmodule Jido.Chat.WhatsApp.PreviewIntegrationTest do
   end
 
   test "receives, normalizes, and replies through the adapter boundary" do
-    {:ok, worker} =
+    {:ok, _worker} =
       start_supervised(
         {ConnectionWorker,
          bridge_id: "bridge_whatsapp_preview",
@@ -107,7 +117,10 @@ defmodule Jido.Chat.WhatsApp.PreviewIntegrationTest do
          config: %{profile: "preview_local", test_pid: self()}}
       )
 
-    assert_receive {:transport_connected, ^worker}
+    assert_receive {:transport_connected, parent}
+    send(parent, {:amarula, :connection_update, %{connection: :open}})
+    assert_receive {:lifecycle_action, %Jido.Chat.ActionEvent{metadata: %{status: :connected}}}
+    refute_received {:reply_sent, _, _, _}
 
     incoming_message = %Msg{
       id: "wamid.inbound",
@@ -123,7 +136,7 @@ defmodule Jido.Chat.WhatsApp.PreviewIntegrationTest do
     }
 
     send(
-      worker,
+      parent,
       {:amarula, :messages_upsert, %{id: "batch-preview", from: incoming_message.from, messages: [incoming_message]}}
     )
 
